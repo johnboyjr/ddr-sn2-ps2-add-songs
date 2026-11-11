@@ -384,9 +384,9 @@ def pad(data):
 # The game unpacks one song's charts into a 0x5D00-byte buffer (found at
 # every caller of its chart loader). Konami's largest is 21,112 bytes.
 CHART_LIMIT = 0x5D00
-LEVEL_INDEX = {(0x14, 4): 0, (0x14, 1): 1, (0x14, 2): 2, (0x14, 3): 3,
-               (0x18, 4): 5, (0x18, 1): 6, (0x18, 2): 7, (0x18, 3): 8}
-DIFF_NAME = {1: "Basic", 2: "Difficult", 3: "Expert", 4: "Beginner"}
+LEVEL_INDEX = {(0x14, 4): 0, (0x14, 1): 1, (0x14, 2): 2, (0x14, 3): 3, (0x14, 6): 4,
+               (0x18, 4): 5, (0x18, 1): 6, (0x18, 2): 7, (0x18, 3): 8, (0x18, 6): 9}
+DIFF_NAME = {1: "Basic", 2: "Difficult", 3: "Expert", 4: "Beginner", 6: "Challenge"}
 
 
 def ps2_chart(song, notes=None):
@@ -414,22 +414,37 @@ def ps2_chart(song, notes=None):
     if not steps:
         raise SN2Error("The song has no single or double charts.")
     real_level = {k: levels[LEVEL_INDEX[k]] for k in steps}
-    # SN2 order: single basic, difficult, expert, beginner; double basic,
-    # difficult, expert. Missing charts borrow the nearest one so every
-    # difficulty the game expects exists.
-    order = [(0x14, 1), (0x14, 2), (0x14, 3), (0x14, 4),
-             (0x18, 1), (0x18, 2), (0x18, 3)]
-    near = {1: [1, 4, 2, 3], 2: [2, 1, 3, 4], 3: [3, 2, 1, 4], 4: [4, 1, 2, 3]}
+    # SN2 order (as Konami's charts): single basic, difficult, expert, beginner,
+    # challenge; double basic, difficult, expert, challenge. Challenge charts
+    # (SSQ difficulty 6; Konami's own on NGO, TRIP MACHINE PhoeniX, PARANOiA
+    # ~HADES~, Fascination ~eternal love mix~) go in only when the song has
+    # one. The other difficulties must all exist: a missing one borrows the
+    # nearest chart the song has.
+    order = [(0x14, 1), (0x14, 2), (0x14, 3), (0x14, 4)] + \
+        ([(0x14, 6)] if (0x14, 6) in steps else []) + \
+        [(0x18, 1), (0x18, 2), (0x18, 3)] + \
+        ([(0x18, 6)] if (0x18, 6) in steps else [])
+    near = {1: [1, 4, 2, 3, 6], 2: [2, 3, 1, 6, 4], 3: [3, 2, 6, 1, 4],
+            4: [4, 1, 2, 3, 6], 6: [6]}
     placed = {}
     for style, diff in order:
-        pool = [(style, d) for d in near[diff]] + \
-               [(0x14 if style == 0x18 else 0x18, d) for d in near[diff]]
+        pool = [(style, d) for d in near[diff]]
+        if diff != 6:
+            pool += [(0x14 if style == 0x18 else 0x18, d) for d in near[diff]]
         placed[(style, diff)] = next(k for k in pool if k in steps)
 
     def total():
         return len(tempo) + len(triggers) + 4 + \
             sum(len(steps[placed[k]]) for k in order)
     smallest = min(steps, key=lambda k: len(steps[k]))
+    if total() > CHART_LIMIT:
+        # 0. Challenge charts are the first to go
+        for k in [(0x18, 6), (0x14, 6)]:
+            if k in order and total() > CHART_LIMIT:
+                order.remove(k)
+                notes.append(f"{'SP' if k[0] == 0x14 else 'DP'} Challenge left out "
+                             f"(too many notes for the game)")
+        smallest = min((placed[k] for k in order), key=lambda k: len(steps[k]))
     if total() > CHART_LIMIT:
         # 1. charts that were only copies stand in with the smallest chart
         for k in order:
@@ -455,6 +470,7 @@ def ps2_chart(song, notes=None):
             notes.append("copied charts were simplified to fit the game")
     out = tempo + triggers
     new_levels = [0] * 10
+    order = sorted(order, key=lambda k: (k[0], {1: 0, 2: 1, 3: 2, 4: 3, 6: 4}[k[1]]))
     for style, diff in order:
         src = placed[(style, diff)]
         block = bytearray(steps[src])
@@ -575,11 +591,22 @@ def vig_decode(data):
 
 
 # ------------------------------------------------------------- images
-def ffmpeg_pal8(src, width, height, colors, extra="", dither="none"):
-    """Scale an image and quantize it; returns (indices, rgba palette)."""
+FFMPEG_MISSING = ("ffmpeg was not found. Put ffmpeg.exe in the same folder as this tool "
+                  "(or install ffmpeg so it is on PATH), then try again.")
+
+
+def need_ffmpeg():
+    """The ffmpeg program, or a clear error if it isn't there."""
+    find_ffmpeg()
     exe = shutil.which("ffmpeg")
     if not exe:
-        raise SN2Error("ffmpeg was not found.")
+        raise SN2Error(FFMPEG_MISSING)
+    return exe
+
+
+def ffmpeg_pal8(src, width, height, colors, extra="", dither="none"):
+    """Scale an image and quantize it; returns (indices, rgba palette)."""
+    exe = need_ffmpeg()
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "pal.bmp"
         graph = (f"[0:v]scale={width}:{height}:flags=lanczos{extra},split[a][b];"
@@ -631,7 +658,7 @@ def banner_tim2(template, image, dither="none", colors=256):
 
 
 def _draw_line(text, size, height):
-    exe = shutil.which("ffmpeg")
+    exe = need_ffmpeg()
     font = next((f for f in (Path("C:/Windows/Fonts/arialbd.ttf"),
                              Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"))
                  if f.exists()), None)
@@ -1079,8 +1106,17 @@ def song_art(song, simfile):
     return sm2ddr.find_art(song)
 
 
+# Byte 62 of a song record holds flags. Bit 0x20 is set on every SuperNOVA 2
+# song that has a Challenge chart (NGO, TRIP MACHINE PhoeniX, PARANOiA ~HADES~,
+# Fascination ~eternal love mix~ and one more), and the game only offers
+# Challenge on songs with it.
+FLAG_BYTE, CHALLENGE_FLAG = 62, 0x20
+
+
 def set_record(game, slot, song, levels):
     rec = game.record(slot)
+    if levels[4] or levels[9]:
+        game.elf[rec + FLAG_BYTE] |= CHALLENGE_FLAG
     bpms = [b for _, b in song.bpms]
     lo, hi = round(min(bpms)), round(max(bpms))
     struct.pack_into("<HH", game.elf, rec + 32, min(hi, 999), min(lo, 999))
@@ -1093,12 +1129,14 @@ def set_record(game, slot, song, levels):
             got = [old_scale(levels[i]) for i in other]
         known = [v for v in got if v] or [1]
         return [v or known[0] for v in got]
-    for off, slots, other in ((52, (1, 2, 3), (6, 7, 8)),
-                              (56, (6, 7, 8), (1, 2, 3))):
+    # the top nibble is the Challenge level (0 = the song has no Challenge;
+    # Konami's challenge songs carry it there, e.g. NGO 0xA976)
+    for off, slots, other, ch in ((52, (1, 2, 3), (6, 7, 8), 4),
+                                  (56, (6, 7, 8), (1, 2, 3), 9)):
         lv = feet(slots, other)
-        old = struct.unpack_from("<H", game.elf, rec + off)[0]
+        chal = min(15, old_scale(levels[ch])) if levels[ch] else 0
         struct.pack_into("<H", game.elf, rec + off,
-                         lv[0] | lv[1] << 4 | lv[2] << 8 | (old & 0xF000))
+                         lv[0] | lv[1] << 4 | lv[2] << 8 | chal << 12)
 
 
 class Placer:
@@ -1153,7 +1191,11 @@ def replace_many(iso, items, out_iso, progress=print, cancelled=lambda: False):
         raise SN2Error("Choose the original SuperNOVA 2 .iso file.")
     if Path(out_iso).resolve() == Path(game.iso).resolve():
         raise SN2Error("Choose a different file to save to; the original is kept.")
-    slots = [slot for _, slot in items]
+    need_ffmpeg()          # titles, banners and audio all need it: say so before any work
+    # items may carry a third value: True/False = turn Challenge on/off for that
+    # song (default: on when the song has a Challenge chart)
+    items = [tuple(x) + (None,) * (3 - len(x)) for x in items]
+    slots = [slot for _, slot, _ in items]
     dupes = sorted({s for s in slots if slots.count(s) > 1})
     if dupes:
         raise SN2Error("Each song can only be replaced once: " + ", ".join(dupes))
@@ -1165,7 +1207,7 @@ def replace_many(iso, items, out_iso, progress=print, cancelled=lambda: False):
     dt = split_pack(game.read(dt_name))
     jobs = []
     # 1. read every song and build its chart, before any slow work
-    for n, (path, slot) in enumerate(items, 1):
+    for n, (path, slot, challenge) in enumerate(items, 1):
         simfile = open_song(path, keep)
         song = sm2ddr.parse_simfile(simfile)
         notes = []
@@ -1176,6 +1218,8 @@ def replace_many(iso, items, out_iso, progress=print, cancelled=lambda: False):
         for note in notes:
             progress(f"  {song.title}: {note}")
         index = game.song_index(slot)
+        if challenge is False:          # Challenge turned off: no Challenge level
+            levels = list(levels); levels[4] = levels[9] = 0
         jobs.append(dict(simfile=simfile, song=song, slot=slot, index=index,
                          chart=chart, levels=levels, shift=shift))
         progress(f"Read {n} of {len(items)}: {song.title}")

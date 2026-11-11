@@ -154,9 +154,11 @@ def describe(simfile, source):
             sn2.ps2_chart(song, notes)
         except (sn2.SN2Error, sm2ddr.ConvertError) as e:
             error = str(e)
+    has_challenge = any(" Challenge " in c for c in charts)
     return dict(title=song.title or simfile.stem, artist=song.artist, bpm=bpm,
                 charts=charts, simfile=str(simfile), source=str(source),
-                slot="", error=error, notes=notes)
+                slot="", error=error, notes=notes,
+                hasChallenge=has_challenge, challenge=has_challenge)
 
 
 def add_paths(paths):
@@ -203,7 +205,8 @@ def auto_assign():
 
 
 def run_patch(out):
-    items = [(s["simfile"], s["slot"]) for s in state["songs"] if s["slot"]]
+    items = [(s["simfile"], s["slot"], bool(s.get("challenge")))
+             for s in state["songs"] if s["slot"]]
     try:
         sn2.replace_many(state["iso"], items, out, progress=log,
                          cancelled=lambda: state["stop"])
@@ -300,6 +303,12 @@ class Handler(BaseHTTPRequestHandler):
                 song["slot"] = slot
                 bump()
             return {}
+        if path == "/api/challenge":
+            with lock:
+                song = next(s for s in state["songs"] if s["id"] == body["id"])
+                song["challenge"] = bool(body.get("on")) and song.get("hasChallenge", False)
+                bump()
+            return {}
         if path == "/api/remove":
             with lock:
                 state["songs"] = [s for s in state["songs"] if s["id"] != body["id"]]
@@ -367,6 +376,7 @@ section{background:var(--panel);border:1px solid var(--line);border-radius:14px;
 padding:18px;margin-bottom:16px}
 h2{margin:0 0 12px;font-size:16px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.chk{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:14px}
 input,select{background:var(--field);color:var(--text);border:1px solid var(--line);
 border-radius:9px;padding:10px 12px;font:inherit;min-width:0}
 input{flex:1}
@@ -379,7 +389,7 @@ width:100%;padding:13px;font-size:16px}
 button.link{background:none;border:none;color:var(--muted);padding:6px}
 .help{color:var(--muted);font-size:13px;margin:8px 0 0}
 .status{font-size:13px;margin-top:8px}.ok{color:var(--ok)}.bad{color:var(--bad)}
-.song{display:grid;grid-template-columns:1fr minmax(240px,340px) auto;gap:12px;
+.song{display:grid;grid-template-columns:1fr auto minmax(240px,340px) auto;gap:12px;
 align-items:center;padding:12px 0;border-top:1px solid var(--line)}
 .song:first-child{border-top:none}
 .title{font-weight:600}.meta{color:var(--muted);font-size:13px}
@@ -461,7 +471,14 @@ function render(){
   sel.onchange=()=>{focused=false;act(()=>api('/api/slot',{id:s.id,slot:sel.value}))};
   const rm=el('button','link','Remove');rm.disabled=busy;
   rm.onclick=()=>act(()=>api('/api/remove',{id:s.id}));
-  row.append(info,sel,rm);box.append(row)}
+  // Challenge: on for songs with a Challenge chart; turns Challenge on in the game for this song
+  const ch=el('label','chk');
+  const cb=el('input');cb.type='checkbox';cb.checked=!!s.challenge;cb.disabled=busy||!s.hasChallenge;
+  cb.onchange=()=>act(()=>api('/api/challenge',{id:s.id,on:cb.checked}));
+  ch.title=s.hasChallenge?'Let this song be played on Challenge':'This song has no Challenge chart';
+  ch.append(cb,document.createTextNode(' Challenge'));
+  if(!s.hasChallenge)ch.style.opacity='0.45';
+  row.append(info,ch,sel,rm);box.append(row)}
  const n=S.songs.filter(s=>s.slot).length;
  $('patch').textContent=busy?'Working…':`Patch and save${n?` (${n} song${n>1?'s':''})`:''}…`;
  $('patch').disabled=busy||!n||!S.iso;
